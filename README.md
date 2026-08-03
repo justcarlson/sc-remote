@@ -49,7 +49,7 @@ sc-remote backend set git@github.com:YOUR_USER/YOUR_PRIVATE_FLEET.git
 sc-remote sync
 ```
 
-Once configured, `host add`, `host remove`, `source add`, and `source remove`
+Once configured, `host add`, `host remove`, `sources add`, and `sources remove`
 pull the latest state, apply one validated change, commit it, and push it. Use
 `--no-sync` to make a local pending change and `sc-remote sync` later.
 

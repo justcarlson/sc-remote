@@ -363,8 +363,12 @@ def run_git(args: Sequence[str], cwd: Path | None = None, *, check: bool = True)
         key_path = Path(settings.backend_ssh_key).expanduser()
         if not key_path.is_file():
             raise UserError(f"configured backend SSH key does not exist: {key_path}")
+        backend_known_hosts = state_dir() / "known_hosts.backend"
+        ensure_known_hosts_parent(backend_known_hosts)
         environment["GIT_SSH_COMMAND"] = (
-            f"ssh -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes -o BatchMode=yes"
+            f"ssh -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes -o BatchMode=yes "
+            f"-o StrictHostKeyChecking=accept-new "
+            f"-o UserKnownHostsFile={shlex.quote(str(backend_known_hosts))}"
         )
     result = subprocess.run(
         ["git", *args],
