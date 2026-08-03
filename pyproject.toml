@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sc-remote"
+version = "0.2.0"
+description = "A source-aware, syncable SSH fleet CLI for humans and agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Justin Carlson" }]
+keywords = ["ssh", "fleet", "agents", "remote", "tailscale"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://github.com/justcarlson/sc-remote"
+Repository = "https://github.com/justcarlson/sc-remote"
+Issues = "https://github.com/justcarlson/sc-remote/issues"
+
+[project.scripts]
+sc-remote = "sc_remote.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

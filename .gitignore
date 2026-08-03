@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+.coverage
+
+# Fleet state and credentials are runtime data, never source.
+fleet.json
+hosts.json
+backend/
+known_hosts*
+*.pem
+*.key
+id_*
+.env
+.env.*
+!.env.example
