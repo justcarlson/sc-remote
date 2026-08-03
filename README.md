@@ -73,21 +73,21 @@ the profile automatically; `SC_REMOTE_SOURCE` or global `--source` can override
 it.
 
 ```bash
-sc-remote source add bastion \
+sc-remote sources add bastion \
   --role agent-bastion \
   --local-target bastion \
   --detect-hostname bastion-01
 
 sc-remote host add db --endpoint ops@db.internal --direct-from bastion
-sc-remote source route-add laptop db --endpoint db-via-vpn
-sc-remote source route-remove laptop db
+sc-remote sources route-add laptop db --endpoint db-via-vpn
+sc-remote sources route-remove laptop db
 ```
 
 Set a fallback bastion when one source should broker otherwise unreachable
 targets through another source:
 
 ```bash
-sc-remote source set-bastion laptop bastion
+sc-remote sources set-bastion laptop bastion
 ```
 
 Routes are one of:

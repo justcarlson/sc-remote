@@ -146,6 +146,18 @@ class FleetTests(TemporaryEnvironment):
         self.assertEqual(code, 2)
         self.assertIn("inline credentials", error)
 
+        code, _, error = self.run_cli("backend", "set", "https://example.com/fleet.git?token=value")
+        self.assertEqual(code, 2)
+        self.assertIn("query parameters", error)
+
+    def test_credential_bearing_endpoint_is_rejected(self) -> None:
+        self.run_cli("init", "--source", "laptop")
+        code, _, error = self.run_cli(
+            "host", "add", "bad", "--endpoint", "ssh://user:password@example.com"
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("without credentials", error)
+
     def test_bastion_routes_are_source_aware(self) -> None:
         fleet = cli.FleetConfig(
             targets=[
@@ -241,6 +253,60 @@ class BackendTests(TemporaryEnvironment):
             self.assertEqual((code, error), (0, ""))
             fleet = cli.load_fleet(cli.backend_fleet_path())
             self.assertEqual([target.alias for target in fleet.targets], ["laptop"])
+
+    def test_mutation_replays_on_a_concurrent_remote_change(self) -> None:
+        self.run_cli("init", "--source", "laptop")
+        self.run_cli("backend", "set", str(self.remote))
+        self.assertEqual(self.run_cli("sync")[0], 0)
+
+        competing = self.root / "competing"
+        subprocess.run(["git", "clone", str(self.remote), str(competing)], check=True, capture_output=True)
+        data = json.loads((competing / "fleet.json").read_text())
+        data["targets"].append(
+            {
+                "alias": "database",
+                "endpoint": "admin@database.example",
+                "platform": "linux",
+                "role": "database",
+                "supports_herdr": False,
+            }
+        )
+        (competing / "fleet.json").write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        subprocess.run(["git", "add", "fleet.json"], cwd=competing, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=competitor",
+                "-c",
+                "user.email=competitor@localhost",
+                "commit",
+                "-m",
+                "Add database",
+            ],
+            cwd=competing,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "push"], cwd=competing, check=True, capture_output=True)
+
+        code, _, error = self.run_cli(
+            "--source",
+            "laptop",
+            "host",
+            "add",
+            "server",
+            "--endpoint",
+            "admin@server.example",
+        )
+        self.assertEqual((code, error), (0, ""))
+        clone = self.root / "final"
+        subprocess.run(["git", "clone", str(self.remote), str(clone)], check=True, capture_output=True)
+        final = json.loads((clone / "fleet.json").read_text())
+        self.assertEqual(
+            {target["alias"] for target in final["targets"]},
+            {"laptop", "database", "server"},
+        )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from urllib.parse import urlsplit
 
 from . import __version__
 
@@ -31,6 +32,9 @@ PRIVATE_KEY_MARKERS = (
 )
 SECRET_FIELD_PATTERN = re.compile(
     r"(^|_)(password|passwd|passphrase|private_key|secret|token|credential)(_|$)", re.IGNORECASE
+)
+ENDPOINT_PATTERN = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9][A-Za-z0-9._-]*|\[[0-9A-Fa-f:]+\])$"
 )
 
 
@@ -152,6 +156,17 @@ def validate_text(value: str, label: str) -> None:
         raise UserError(f"{label} contains private-key material; credentials must remain outside sc-remote")
 
 
+def validate_endpoint(value: str, label: str, *, allow_empty: bool = False) -> None:
+    validate_text(value, label)
+    if not value and allow_empty:
+        return
+    if not ENDPOINT_PATTERN.fullmatch(value):
+        raise UserError(
+            f"invalid {label}; use an SSH alias, host, user@host, or bracketed IPv6 address "
+            "without credentials or URL parameters"
+        )
+
+
 def reject_secret_material(value: Any, path: str = "fleet") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -235,7 +250,7 @@ def validate_fleet(fleet: FleetConfig) -> None:
     aliases: set[str] = set()
     for target in fleet.targets:
         validate_name(target.alias, "host alias")
-        validate_text(target.endpoint, f"endpoint for {target.alias}")
+        validate_endpoint(target.endpoint, f"endpoint for {target.alias}", allow_empty=True)
         if target.alias in aliases:
             raise UserError(f"duplicate target alias {target.alias!r}")
         aliases.add(target.alias)
@@ -252,7 +267,7 @@ def validate_fleet(fleet: FleetConfig) -> None:
                 raise UserError(f"direct target {alias!r} from {source.name!r} has no endpoint")
         for alias, endpoint in source.endpoint_overrides.items():
             target_by_name(fleet, alias)
-            validate_text(endpoint, f"endpoint override for {source.name}/{alias}")
+            validate_endpoint(endpoint, f"endpoint override for {source.name}/{alias}")
         if source.fallback_bastion:
             target_by_name(fleet, source.fallback_bastion)
             if source.fallback_bastion not in source.direct_targets:
@@ -355,8 +370,16 @@ def validate_backend_url(url: str) -> None:
     validate_text(url, "backend URL")
     if not url:
         raise UserError("backend URL may not be empty")
-    if re.search(r"://[^/@:]+:[^/@]+@", url):
-        raise UserError("backend URL contains inline credentials; use SSH or a Git credential helper")
+    if "?" in url or "#" in url:
+        raise UserError("backend URL may not contain query parameters or fragments")
+    if "://" in url:
+        parsed = urlsplit(url)
+        if parsed.password is not None or (parsed.scheme in {"http", "https"} and parsed.username):
+            raise UserError("backend URL contains inline credentials; use SSH or a Git credential helper")
+        if parsed.scheme not in {"file", "http", "https", "ssh"}:
+            raise UserError(f"unsupported backend URL scheme {parsed.scheme!r}")
+    elif "@" in url and not re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:.+", url):
+        raise UserError("invalid SCP-style Git backend URL")
 
 
 def ensure_backend_checkout(settings: Settings) -> Path:
@@ -456,7 +479,14 @@ def sync_backend(*, message: str = "Update fleet state") -> dict[str, Any]:
     committed = commit_pending_fleet(checkout, message)
     pulled = False
     if remote_branch_exists(checkout, branch):
-        run_git(["pull", "--rebase", "origin", branch], checkout)
+        pull = run_git(["pull", "--rebase", "origin", branch], checkout, check=False)
+        if pull.returncode:
+            run_git(["rebase", "--abort"], checkout, check=False)
+            detail = pull.stderr.strip() or pull.stdout.strip()
+            raise UserError(
+                "backend changed concurrently; rebase was aborted and local fleet state was restored. "
+                f"Resolve the competing update or repeat the original mutation. Git said: {detail}"
+            )
         pulled = True
     if not (checkout / "fleet.json").is_file():
         raise UserError("backend has no fleet.json and no local fleet exists; run 'sc-remote init' first")
@@ -494,6 +524,8 @@ def mutate_fleet(
     message: str,
     operation: Callable[[FleetConfig], FleetConfig],
 ) -> FleetConfig:
+    if not explicit and load_settings().backend_url and should_sync:
+        return mutate_synced_backend(message, operation)
     path = prepare_mutation(explicit, should_sync)
     fleet = load_fleet(path)
     updated = operation(fleet)
@@ -501,6 +533,54 @@ def mutate_fleet(
     if not explicit and load_settings().backend_url and should_sync:
         sync_backend(message=message)
     return updated
+
+
+def mutate_synced_backend(
+    message: str,
+    operation: Callable[[FleetConfig], FleetConfig],
+    *,
+    attempts: int = 3,
+) -> FleetConfig:
+    """Apply an operation to the latest remote revision and retry push races.
+
+    The operation, rather than a textual JSON merge, is replayed on the newest
+    fleet state. This lets independent host and route changes converge while
+    making same-object conflicts fail through normal operation validation.
+    """
+    settings = load_settings()
+    checkout = ensure_backend_checkout(settings)
+    copy_local_fleet_into_empty_backend(checkout)
+    # First settle any explicit --no-sync update. A textual conflict is
+    # aborted by sync_backend, so the checkout never remains in rebase state.
+    sync_backend(message="Synchronize fleet state")
+    checkout = backend_dir()
+    branch = git_branch(checkout)
+
+    for attempt in range(1, attempts + 1):
+        run_git(["fetch", "origin", branch], checkout)
+        if remote_branch_exists(checkout, branch):
+            local_revision = run_git(["rev-parse", "HEAD"], checkout).stdout.strip()
+            remote_revision = run_git(["rev-parse", f"origin/{branch}"], checkout).stdout.strip()
+            if local_revision != remote_revision:
+                dirty = backend_dirty_paths(checkout)
+                if dirty:
+                    raise UserError(f"backend checkout has pending changes: {', '.join(dirty)}")
+                # This checkout is dedicated managed state. Resetting it to the
+                # fetched remote revision cannot affect user source files.
+                run_git(["reset", "--hard", f"origin/{branch}"], checkout)
+
+        latest = load_fleet(checkout / "fleet.json")
+        updated = operation(latest)
+        save_fleet(checkout / "fleet.json", updated)
+        commit_pending_fleet(checkout, message)
+        push = run_git(["push", "origin", f"HEAD:{branch}"], checkout, check=False)
+        if push.returncode == 0:
+            save_fleet(local_fleet_path(), updated)
+            return updated
+        if attempt == attempts:
+            detail = push.stderr.strip() or push.stdout.strip()
+            raise UserError(f"backend changed during {attempts} mutation attempts: {detail}")
+    raise AssertionError("unreachable mutation retry loop")
 
 
 def known_hosts_path(source: SourceProfile) -> Path:
@@ -730,7 +810,7 @@ def handle_mutation(args: argparse.Namespace) -> int:
     if args.action == "host" and args.host_action == "add":
         def operation(fleet: FleetConfig) -> FleetConfig:
             validate_name(args.alias, "host alias")
-            validate_text(args.endpoint, "host endpoint")
+            validate_endpoint(args.endpoint, "host endpoint")
             existing = next((target for target in fleet.targets if target.alias == args.alias), None)
             if existing and not args.replace:
                 raise UserError(f"host {args.alias!r} already exists; use --replace")
@@ -832,7 +912,7 @@ def handle_mutation(args: argparse.Namespace) -> int:
             if args.sources_action == "route-add":
                 direct.add(args.target)
                 if args.endpoint:
-                    validate_text(args.endpoint, "route endpoint")
+                    validate_endpoint(args.endpoint, "route endpoint")
                     overrides[args.target] = args.endpoint
             else:
                 if source.fallback_bastion == args.target:
