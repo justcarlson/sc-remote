@@ -150,6 +150,32 @@ class FleetTests(TemporaryEnvironment):
         self.assertEqual(code, 2)
         self.assertIn("query parameters", error)
 
+    def test_backend_ssh_key_must_exist_and_have_private_mode(self) -> None:
+        missing = self.root / "missing-key"
+        code, _, error = self.run_cli(
+            "backend", "set", "git@example.com:owner/fleet.git", "--ssh-key", str(missing)
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("does not exist", error)
+
+        key = self.root / "backend-auth"
+        key.write_text("test fixture, not a real key")
+        key.chmod(0o644)
+        code, _, error = self.run_cli(
+            "backend", "set", "git@example.com:owner/fleet.git", "--ssh-key", str(key)
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("group or others", error)
+
+        key.chmod(0o600)
+        code, output, error = self.run_cli(
+            "backend", "set", "git@example.com:owner/fleet.git", "--ssh-key", str(key)
+        )
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("backend_ssh_key=configured", output)
+        settings = cli.load_settings()
+        self.assertEqual(settings.backend_ssh_key, str(key.resolve()))
+
     def test_credential_bearing_endpoint_is_rejected(self) -> None:
         self.run_cli("init", "--source", "laptop")
         code, _, error = self.run_cli(

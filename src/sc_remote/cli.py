@@ -82,6 +82,7 @@ class FleetRoute:
 @dataclass(frozen=True)
 class Settings:
     backend_url: str = ""
+    backend_ssh_key: str = ""
 
 
 def xdg_path(variable: str, fallback: Path) -> Path:
@@ -137,7 +138,10 @@ def load_settings() -> Settings:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise UserError(f"{path} must contain a JSON object")
-    return Settings(backend_url=str(data.get("backend_url") or ""))
+    return Settings(
+        backend_url=str(data.get("backend_url") or ""),
+        backend_ssh_key=str(data.get("backend_ssh_key") or ""),
+    )
 
 
 def save_settings(settings: Settings) -> None:
@@ -353,12 +357,22 @@ def selected_fleet_path(explicit: Path | None = None) -> Path:
 
 
 def run_git(args: Sequence[str], cwd: Path | None = None, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    settings = load_settings()
+    if settings.backend_ssh_key:
+        key_path = Path(settings.backend_ssh_key).expanduser()
+        if not key_path.is_file():
+            raise UserError(f"configured backend SSH key does not exist: {key_path}")
+        environment["GIT_SSH_COMMAND"] = (
+            f"ssh -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes -o BatchMode=yes"
+        )
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
@@ -732,6 +746,11 @@ def make_parser() -> argparse.ArgumentParser:
     backend_sub = backend_parser.add_subparsers(dest="backend_action", required=True)
     backend_set = backend_sub.add_parser("set", help="set the Git backend URL")
     backend_set.add_argument("url")
+    backend_set.add_argument(
+        "--ssh-key",
+        type=Path,
+        help="host-local SSH private-key path used only through GIT_SSH_COMMAND",
+    )
     backend_sub.add_parser("status", help="show backend configuration without credentials")
     backend_sub.add_parser("clear", help="disable backend sync without deleting data")
     backend_sub.add_parser("reset-checkout", help="delete only the cached backend checkout")
@@ -952,13 +971,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.action == "backend":
             if args.backend_action == "set":
                 validate_backend_url(args.url)
-                save_settings(Settings(backend_url=args.url))
+                key = ""
+                if args.ssh_key:
+                    key_path = args.ssh_key.expanduser().resolve()
+                    if not key_path.is_file():
+                        raise UserError(f"backend SSH key does not exist: {key_path}")
+                    if key_path.stat().st_mode & 0o077:
+                        raise UserError(
+                            f"backend SSH key must not be accessible by group or others: {key_path}"
+                        )
+                    key = str(key_path)
+                save_settings(Settings(backend_url=args.url, backend_ssh_key=key))
                 print(f"backend={args.url}")
+                print(f"backend_ssh_key={'configured' if key else '(default SSH configuration)'}")
                 print("next=sc-remote sync")
                 return 0
             if args.backend_action == "status":
                 settings = load_settings()
                 print(f"backend={settings.backend_url or '(disabled)'}")
+                print(
+                    "backend_ssh_key="
+                    + ("configured" if settings.backend_ssh_key else "(default SSH configuration)")
+                )
                 print(f"checkout={backend_dir()}")
                 print(f"checkout_ready={'yes' if (backend_dir() / '.git').is_dir() else 'no'}")
                 return 0

@@ -66,6 +66,14 @@ The backend can be GitHub, GitLab, Forgejo, a bare repository over SSH, or any
 other Git remote. Authentication is delegated to Git/SSH; tokens and private
 keys are never copied into fleet data.
 
+For a dedicated host-local deploy key, give only its path. The path stays in
+the local settings file and the key stays on that host:
+
+```bash
+sc-remote backend set git@github.com:YOUR_USER/YOUR_PRIVATE_FLEET.git \
+  --ssh-key ~/.local/state/sc-remote/backend_auth
+```
+
 ## Source and route management
 
 Each machine that runs the tool has a source profile. Hostname detection picks
