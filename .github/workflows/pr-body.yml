@@ -1,0 +1,62 @@
+# PR-body lint from Silent-Cartographer ai/tools/pr/pr-body.yml. Only runs-on may differ.
+name: pr-body
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    # Bots such as Dependabot write their own bodies.
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the body follows the pr skill
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          body = (os.environ.get("PR_BODY") or "").replace("\r\n", "\n")
+          errors = []
+          # Headings inside fenced blocks do not count.
+          text = re.sub(r"(?ms)^(```|~~~).*?^\1[^\n]*$", lambda m: re.sub(r"(?m)^#", " ", m.group(0)), body)
+          headings = re.findall(r"(?m)^## +(.+?)\s*$", text)
+          wanted = ["Summary", "Evidence", "Merge Danger"]
+          if [h for h in headings if h in wanted] != wanted:
+              errors.append("Use the headings ## Summary, ## Evidence, ## Merge Danger, once each and in that order.")
+          if not body.lstrip().startswith("## Summary"):
+              errors.append("Start the body at ## Summary, with no preamble.")
+
+          def section(name):
+              match = re.search(rf"(?ms)^## +{re.escape(name)}\s*$(.*?)(?=^## |\Z)", text)
+              return match.group(1) if match else ""
+
+          if not re.search(r"(?m)^(```|~~~)", section("Summary")) and "![" not in section("Summary"):
+              errors.append("Summary needs a visual: a fenced diagram, tree, diff, or code block.")
+          evidence = section("Evidence")
+          for label in ("Before", "After"):
+              if not re.search(rf"\*\*{label}:\*\* *\S", evidence):
+                  errors.append(f"Evidence needs a filled **{label}:** line.")
+          danger = section("Merge Danger")
+          if not re.search(r"\*\*Door:\*\* *(one|two)-way\b", danger, re.I):
+              errors.append("Merge Danger needs **Door:** one-way or two-way.")
+          if not re.search(r"\*\*Blast Radius:\*\* *\S", danger):
+              errors.append("Merge Danger needs a filled **Blast Radius:** line.")
+          placeholders = re.findall(r"<(?:diagram, diff-sketch, or tree|screenshot/output/[^>]*|one-way or two-way|one-word description|optional:[^>]*)>", body)
+          if placeholders:
+              errors.append("Replace template placeholders: " + ", ".join(sorted(set(placeholders))))
+          for error in errors:
+              print(f"::error title=PR body::{error}")
+          if errors:
+              print("Template: https://github.com/mattpocock/skills/blob/main/skills/engineering/pr/SKILL.md")
+          sys.exit(1 if errors else 0)
+          PY
